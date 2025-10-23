@@ -1,0 +1,113 @@
+<!-- test_upload.html -->
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>PDF Upload + SSE Test</title>
+    <style>
+      body { font-family: Arial, sans-serif; padding: 20px; max-width: 800px; }
+      .log { border: 1px solid #ddd; padding: 8px; height: 180px; overflow: auto; background:#fafafa }
+      .row { margin: 10px 0; }
+    </style>
+  </head>
+  <body>
+    <h2>PDF Upload + SSE Test</h2>
+
+    <div class="row">
+      <label>Select PDF: <input type="file" id="fileInput" accept="application/pdf" /></label>
+    </div>
+
+    <div class="row">
+      <button id="startBtn">Start SSE & Upload</button>
+      <span id="status" style="margin-left:12px"></span>
+    </div>
+
+    <div class="row">
+      <div>Upload progress: <progress id="progress" max="100" value="0" style="width:400px;"></progress></div>
+    </div>
+
+    <div class="row">
+      <div><strong>Server messages:</strong></div>
+      <div class="log" id="log"></div>
+    </div>
+
+    <script>
+      const startBtn = document.getElementById("startBtn");
+      const fileInput = document.getElementById("fileInput");
+      const logEl = document.getElementById("log");
+      const progress = document.getElementById("progress");
+      const status = document.getElementById("status");
+
+      // generate a client-side file_id (UUID v4-like)
+      function randomId() {
+        return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+          (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+        );
+      }
+
+      function addLog(msg) {
+        const p = document.createElement("div");
+        p.textContent = `${new Date().toLocaleTimeString()} — ${msg}`;
+        logEl.appendChild(p);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      startBtn.onclick = async () => {
+        const file = fileInput.files[0];
+        if (!file) {
+          alert("Choose a PDF first");
+          return;
+        }
+        const fileId = randomId();
+        status.textContent = `file_id=${fileId}`;
+
+        // open SSE first so we don't miss quick events
+        const es = new EventSource(`http://localhost:8000/events/${fileId}`);
+        es.onmessage = (e) => {
+          addLog(`[SSE] ${e.data}`);
+          // close on done marker
+          if (e.data === "__DONE__") {
+            addLog("[SSE] stream closed by server");
+            setTimeout(() => es.close(), 1000);
+          }
+        };
+        es.onerror = (err) => {
+          addLog("[SSE] connection error");
+        };
+
+        // Now upload with progress via XMLHttpRequest (gives us upload progress)
+        const form = new FormData();
+        form.append("file", file, file.name);
+        form.append("file_id", fileId);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "http://localhost:8000/upload", true);
+
+        xhr.upload.onprogress = function (evt) {
+          if (evt.lengthComputable) {
+            const pct = Math.round((evt.loaded / evt.total) * 100);
+            progress.value = pct;
+            status.textContent = `Uploading ${pct}% (file_id=${fileId})`;
+          }
+        };
+
+        xhr.onload = function () {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            addLog("[HTTP] Upload complete, server responded: " + xhr.responseText);
+            status.textContent = "Upload done; waiting for server save confirmation...";
+          } else {
+            addLog("[HTTP] Upload failed: " + xhr.status + " " + xhr.statusText);
+            status.textContent = "Upload failed";
+          }
+        };
+
+        xhr.onerror = function () {
+          addLog("[HTTP] Upload error");
+          status.textContent = "Upload error";
+        };
+
+        xhr.send(form);
+      };
+    </script>
+  </body>
+</html>
