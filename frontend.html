@@ -2,29 +2,25 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>SSE Upload Test</title>
+  <title>SSE Upload + Query Test</title>
   <style>
-    body { font-family: Inter, Arial, sans-serif; margin: 22px; max-width: 820px; }
-    .row { margin: 12px 0; }
-    .log { border: 1px solid #e6e6e6; padding: 10px; height: 220px; overflow: auto; background:#fafafa; white-space:pre-wrap; }
+    body { font-family: Inter, Arial, sans-serif; padding:18px; max-width: 900px; }
+    .row { margin: 10px 0; }
+    .log { border:1px solid #eee; padding:8px; height:180px; overflow:auto; background:#fafafa; white-space:pre-wrap; }
+    .toast { padding:8px 12px; border-radius:8px; color:#fff; margin-bottom:8px; }
+    .toast.warn { background:#d97706; }
+    .toast.info { background:#2b6cb0; }
     .controls { display:flex; gap:10px; align-items:center; }
-    button { padding:8px 12px; cursor:pointer; }
-    .small { font-size: 0.9rem; color:#666; }
-    .toast-container { position: fixed; right: 18px; top: 18px; z-index: 9999; display:flex; flex-direction:column; gap:8px; }
-    .toast { padding:10px 14px; border-radius:8px; box-shadow: 0 6px 18px rgba(0,0,0,0.08); color:white; min-width: 220px; }
-    .toast.info { background:#2b6cb0; } /* blue */
-    .toast.success { background:#168c46; } /* green */
-    .toast.warn { background:#d97706; } /* yellow/orange */
-    .toast.error { background:#c53030; } /* red */
-    .meta { margin-left:8px; color:#333; font-weight:600; }
+    .small { font-size:0.9rem; color:#666; }
+    #answer { white-space:pre-wrap; border:1px solid #ddd; padding:10px; min-height:120px; background:#fff; }
   </style>
 </head>
 <body>
-  <h2>SSE + PDF Upload Tester</h2>
+  <h2>Upload (SSE for retry-only) + Query Test</h2>
 
   <div class="row controls">
     <input type="file" id="fileInput" accept="application/pdf" />
-    <button id="startBtn">Start SSE & Upload</button>
+    <button id="startBtn">Open SSE & Upload</button>
     <span class="small" id="status">idle</span>
   </div>
 
@@ -33,177 +29,165 @@
   </div>
 
   <div class="row">
-    <div><strong>Server log</strong></div>
+    <div><strong>Server SSE Log (retry messages only)</strong></div>
     <div id="log" class="log"></div>
   </div>
 
+  <hr />
+
   <div class="row">
-    <div class="small">Tips: connect SSE first. Server should be at <code>http://localhost:8000</code>.</div>
+    <input type="text" id="question" placeholder="Ask something (e.g. 'what is the renewal process for the policy?')" style="width:70%" />
+    <button id="askBtn">Ask</button>
+    <input type="text" id="fileIdInput" placeholder="file_id (if unknown, upload first)" style="width:25%" />
   </div>
 
-  <div class="toast-container" id="toastRoot"></div>
+  <div class="row">
+    <div><strong>Answer (streaming)</strong></div>
+    <div id="answer"></div>
+  </div>
+
+  <div id="toasts"></div>
 
 <script>
-/* Minimal client to test FastAPI SSE + /upload
-   Assumes:
-     - SSE endpoint: GET /events/{file_id}
-     - Upload endpoint: POST /upload?file_id={file_id} (multipart form includes file)
-*/
-const startBtn = document.getElementById('startBtn');
-const fileInput = document.getElementById('fileInput');
-const logEl = document.getElementById('log');
-const progress = document.getElementById('progress');
-const status = document.getElementById('status');
-const toastRoot = document.getElementById('toastRoot');
-
 function now() { return new Date().toLocaleTimeString(); }
-function addLog(msg) {
-  const p = document.createElement('div');
-  p.textContent = `${now()} — ${msg}`;
-  logEl.appendChild(p);
-  logEl.scrollTop = logEl.scrollHeight;
+function addLog(txt) {
+  const el = document.getElementById('log');
+  const d = document.createElement('div');
+  d.textContent = `${now()} — ${txt}`;
+  el.appendChild(d);
+  el.scrollTop = el.scrollHeight;
 }
-
-// tiny toast system (no deps)
-function showToast(text, kind='info', ttl=6000) {
+function showToast(text) {
   const t = document.createElement('div');
-  t.className = `toast ${kind}`;
+  t.className = 'toast warn';
   t.textContent = text;
-  toastRoot.appendChild(t);
-  setTimeout(()=> {
-    t.style.transition = 'opacity 300ms';
-    t.style.opacity = '0';
-    setTimeout(()=> t.remove(), 350);
-  }, ttl);
-  return t;
+  const root = document.getElementById('toasts');
+  root.appendChild(t);
+  setTimeout(()=> t.remove(), 7000);
 }
 
-// client-side UUID generator (v4-like)
-function randomId() {
+// v4-like uuid
+function randomId(){
   return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
     (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
   );
 }
 
+// elements
+const startBtn = document.getElementById('startBtn');
+const fileInput = document.getElementById('fileInput');
+const progress = document.getElementById('progress');
+const status = document.getElementById('status');
+const askBtn = document.getElementById('askBtn');
+const fileIdInput = document.getElementById('fileIdInput');
+const answerEl = document.getElementById('answer');
+
+let currentEventSource = null;
+let currentFileId = null;
+
 startBtn.onclick = async () => {
   const file = fileInput.files[0];
-  if (!file) { alert('Choose a PDF first'); return; }
-  // generate file_id, open SSE, then upload
-  const fileId = randomId();
-  status.textContent = `file_id=${fileId}`;
-  addLog(`client: will use file_id=${fileId}`);
+  if (!file) return alert('Choose a PDF first');
+
+  currentFileId = randomId();
+  fileIdInput.value = currentFileId;
+  status.textContent = `file_id=${currentFileId}`;
+  addLog(`Client created file_id=${currentFileId}`);
 
   // open SSE first
-  const sseUrl = `http://localhost:8000/events/${fileId}`;
-  addLog(`connecting SSE → ${sseUrl}`);
-  let es;
-  try {
-    es = new EventSource(sseUrl);
-  } catch (err) {
-    addLog(`SSE create failed: ${err}`);
-    showToast('SSE connection failed', 'error', 6000);
-    return;
-  }
+  const sseUrl = `http://localhost:8000/events/${currentFileId}`;
+  addLog(`Opening SSE -> ${sseUrl}`);
+  const es = new EventSource(sseUrl);
+  currentEventSource = es;
 
-  es.onopen = () => {
-    addLog('SSE: connection opened');
-    showToast('SSE connected', 'success', 2000);
-  };
-
+  es.onopen = () => { addLog('SSE connected'); }
   es.onmessage = (e) => {
     const msg = e.data;
+    // per your instruction: SSE will only send retry messages (and __DONE__ possibly)
     addLog(`[SSE] ${msg}`);
-
-    // handle special messages
+    if (msg && msg.toLowerCase().includes('retrying')) {
+      showToast(msg);
+    }
     if (msg === '__DONE__') {
-      showToast('Ingestion finished', 'success', 4000);
-      // small delay then close
-      setTimeout(()=> {
-        try { es.close(); addLog('SSE: closed'); } catch(e){}
-      }, 800);
-      progress.value = 100;
-      status.textContent = 'done';
-      return;
-    }
-
-    // server reported file received
-    if (msg === 'file_received') {
-      showToast('Server: file received', 'info', 2500);
-      status.textContent = 'upload received by server';
-    }
-
-    // file_saved:<name>
-    if (msg.startsWith('file_saved:')) {
-      const name = msg.split(':')[1];
-      showToast(`Server: saved as ${name}`, 'success', 4000);
-      status.textContent = `saved: ${name}`;
-    }
-
-    // retrying message (rate-limit)
-    if (msg.toLowerCase().includes('retrying') || msg.toLowerCase().includes('rate-limit')) {
-      showToast(msg, 'warn', 8000);
-      // optionally highlight progress area
-    }
-
-    // errors
-    if (msg.toLowerCase().startsWith('error')) {
-      showToast(msg, 'error', 8000);
-      status.textContent = 'error';
+      addLog('SSE: ingestion signaled done');
+      // closing SSE is safe
+      try { es.close(); addLog('SSE closed'); } catch(e){}
     }
   };
-
   es.onerror = (err) => {
-    addLog('SSE: error / closed by browser or network');
-    showToast('SSE disconnected', 'error', 4000);
-    status.textContent = 'sse_error';
-    // EventSource will auto-reconnect by default — but server may reject reconnects (409) for single-listener
+    addLog('SSE disconnected or error');
   };
 
-  // small delay to ensure SSE handshake is established on server side
-  await new Promise(res => setTimeout(res, 200));
+  // small wait to ensure server created listener
+  await new Promise(r=>setTimeout(r, 200));
 
-  // now upload using XMLHttpRequest to get progress events
+  // upload via XMLHttpRequest to see progress
   const form = new FormData();
   form.append('file', file, file.name);
+  form.append('file_id', currentFileId);
 
-  // include file_id as query param (server expects file_id param)
-  const uploadUrl = `http://localhost:8000/upload?file_id=${encodeURIComponent(fileId)}`;
   const xhr = new XMLHttpRequest();
-  xhr.open('POST', uploadUrl, true);
-
-  xhr.upload.onprogress = function(evt) {
+  xhr.open('POST', 'http://localhost:8000/upload', true);
+  xhr.upload.onprogress = (evt) => {
     if (evt.lengthComputable) {
       const pct = Math.round((evt.loaded / evt.total) * 100);
       progress.value = pct;
-      status.textContent = `Uploading ${pct}% (file_id=${fileId})`;
+      status.textContent = `Uploading ${pct}% (file_id=${currentFileId})`;
     }
   };
-
-  xhr.onload = function() {
+  xhr.onload = () => {
     if (xhr.status >= 200 && xhr.status < 300) {
-      addLog('[HTTP] Upload complete: ' + xhr.responseText);
-      showToast('Upload complete (server handling)', 'info', 2500);
-      // server will announce file_saved via SSE when saved/processed
+      addLog('[HTTP] Upload accepted - ingestion started by server');
+      status.textContent = 'ingestion_started';
     } else {
-      addLog('[HTTP] Upload failed: ' + xhr.status + ' ' + xhr.statusText);
-      showToast('Upload failed', 'error', 4000);
+      addLog(`[HTTP] Upload failed: ${xhr.status} ${xhr.statusText}`);
       status.textContent = 'upload_failed';
     }
   };
-
-  xhr.onerror = function() {
+  xhr.onerror = () => {
     addLog('[HTTP] Upload error');
-    showToast('Upload error', 'error', 4000);
     status.textContent = 'upload_error';
   };
+  xhr.send(form);
+  addLog('[HTTP] upload started');
+};
+
+askBtn.onclick = async () => {
+  const q = document.getElementById('question').value.trim();
+  const file_id = document.getElementById('fileIdInput').value.trim();
+  if (!q) return alert('Type a question');
+  if (!file_id) return alert('Enter file_id (upload first)');
+
+  answerEl.textContent = '';
+  addLog(`Querying file_id=${file_id} q="${q}"`);
+  showToast('Query started');
+
+  // POST form and stream response
+  const form = new FormData();
+  form.append('file_id', file_id);
+  form.append('question', q);
+  form.append('k', 5);
 
   try {
-    xhr.send(form);
-    addLog('[HTTP] upload started');
-    showToast('Uploading...', 'info', 2000);
+    const resp = await fetch('http://localhost:8000/query', { method: 'POST', body: form });
+    if (!resp.ok) {
+      const text = await resp.text();
+      addLog(`[HTTP] query failed: ${resp.status} ${text}`);
+      return;
+    }
+    // stream reader
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      answerEl.textContent += chunk;
+      answerEl.scrollTop = answerEl.scrollHeight;
+    }
+    addLog('Query stream finished');
   } catch (e) {
-    addLog('[HTTP] send error: ' + e);
-    showToast('Upload start failed', 'error', 4000);
+    addLog('Query error: ' + e.toString());
   }
 };
 </script>
