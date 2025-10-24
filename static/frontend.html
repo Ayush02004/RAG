@@ -2,192 +2,666 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>SSE Session Upload + Query</title>
+  <title>Document Q&A</title>
   <style>
-    body { font-family: Inter, Arial, sans-serif; padding:18px; max-width:900px; }
-    .row { margin: 10px 0; }
-    #log { border:1px solid #eee; padding:8px; height:200px; overflow:auto; background:#fafafa; white-space:pre-wrap; }
-    .toast { padding:8px 12px; border-radius:8px; color:#fff; margin-bottom:8px; }
-    .toast.warn { background:#d97706; }
-    .btn { padding:8px 12px; }
+    :root {
+      color-scheme: light;
+      font-family: "Inter", "Segoe UI", Arial, sans-serif;
+      --bg: #f4f7fb;
+      --card-bg: #ffffff;
+      --border: #e2e8f0;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --text: #0f172a;
+      --muted: #64748b;
+      --success: #16a34a;
+      --warn: #d97706;
+      --error: #dc2626;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: linear-gradient(180deg, var(--bg) 0%, #eef2ff 100%);
+      color: var(--text);
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 48px 16px 64px;
+    }
+
+    .app {
+      width: 100%;
+      max-width: 980px;
+      background: var(--card-bg);
+      border-radius: 20px;
+      box-shadow: 0 24px 50px rgba(15, 23, 42, 0.08);
+      overflow: hidden;
+    }
+
+    header {
+      padding: 32px 40px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 16px;
+    }
+
+    header h1 {
+      flex: 1 1 auto;
+      margin: 0;
+      font-size: 1.75rem;
+    }
+
+    .session-pill {
+      font-size: 0.9rem;
+      padding: 6px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: #f8fafc;
+      color: var(--muted);
+    }
+
+    main {
+      padding: 24px 40px 40px;
+      display: grid;
+      gap: 28px;
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 24px;
+      background: #fff;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .card h2 {
+      margin: 0;
+      font-size: 1.2rem;
+    }
+
+    .card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .upload-controls,
+    .query-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .status-pill {
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: #f8fafc;
+      color: var(--muted);
+      font-size: 0.9rem;
+      border: 1px solid var(--border);
+      min-width: 120px;
+      text-align: center;
+    }
+
+    input[type="text"] {
+      flex: 1 1 260px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      font-size: 1rem;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    input[type="text"]:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+    }
+
+    button {
+      border: none;
+      cursor: pointer;
+      border-radius: 999px;
+      font-size: 1rem;
+      padding: 12px 22px;
+      font-weight: 600;
+      transition: transform 0.15s ease, box-shadow 0.15s ease, background-color 0.2s;
+    }
+
+    button.primary {
+      background: var(--accent);
+      color: #fff;
+      box-shadow: 0 12px 24px rgba(37, 99, 235, 0.2);
+    }
+
+    button.primary:hover {
+      background: var(--accent-hover);
+      transform: translateY(-1px);
+    }
+
+    button[disabled] {
+      opacity: 0.5;
+      cursor: not-allowed;
+      box-shadow: none;
+      transform: none;
+    }
+
+    progress {
+      width: 100%;
+      height: 10px;
+      border-radius: 999px;
+      overflow: hidden;
+      appearance: none;
+    }
+
+    progress::-webkit-progress-bar {
+      background: #e2e8f0;
+    }
+
+    progress::-webkit-progress-value {
+      background: var(--accent);
+    }
+
+    .progress-wrapper {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .dropzone {
+      flex: 1 1 260px;
+      min-height: 150px;
+      border: 2px dashed var(--border);
+      border-radius: 16px;
+      background: #f8fafc;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.2s;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .dropzone.dragover {
+      border-color: var(--accent);
+      background: rgba(37, 99, 235, 0.08);
+      transform: translateY(-2px);
+    }
+
+    .dropzone.has-file {
+      border-color: rgba(21, 128, 61, 0.8);
+      background: rgba(21, 128, 61, 0.08);
+    }
+
+    .dropzone .dz-content {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+    }
+
+    .dropzone .dz-title {
+      font-weight: 600;
+      font-size: 1.05rem;
+      color: var(--text);
+    }
+
+    .dropzone .dz-hint {
+      font-size: 0.9rem;
+    }
+
+    .dropzone .dz-filename {
+      font-size: 0.92rem;
+      color: var(--muted);
+    }
+
+    .dropzone input[type="file"] {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+      width: 0;
+      height: 0;
+    }
+
+    .dropzone .dz-spinner {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(15, 23, 42, 0.75);
+      color: #fff;
+      gap: 12px;
+      padding: 24px;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      pointer-events: none;
+    }
+
+    .dropzone.loading .dz-spinner {
+      opacity: 1;
+    }
+
+    .dropzone.loading .dz-content {
+      opacity: 0.25;
+    }
+
+    .answer-box {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+      min-height: 160px;
+      background: #f8fafc;
+      font-size: 1rem;
+      line-height: 1.6;
+      white-space: pre-wrap;
+    }
+
+    .toast-stack {
+      position: fixed;
+      top: 24px;
+      right: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      z-index: 1000;
+    }
+
+    .toast {
+      padding: 14px 18px;
+      border-radius: 12px;
+      color: #fff;
+      min-width: 220px;
+      box-shadow: 0 18px 30px rgba(15, 23, 42, 0.15);
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .toast.info { background: #3b82f6; }
+    .toast.success { background: var(--success); }
+    .toast.warn { background: var(--warn); }
+    .toast.error { background: var(--error); }
+
+    .spinner {
+      width: 46px;
+      height: 46px;
+      border-radius: 50%;
+      border: 5px solid rgba(255, 255, 255, 0.25);
+      border-top-color: #fff;
+      margin: 0 auto 18px;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    @media (max-width: 720px) {
+      body { padding: 32px 12px; }
+      header, main { padding-left: 20px; padding-right: 20px; }
+      .card { padding: 20px; }
+      .upload-controls, .query-controls { flex-direction: column; align-items: stretch; }
+      .dropzone { width: 100%; }
+      button { width: 100%; }
+    }
   </style>
 </head>
 <body>
-  <h2>SSE Session Upload + Query (cookie-based sessions)</h2>
+  <div class="app">
+    <header>
+      <h1>Document Q&A Assistant</h1>
+      <span class="session-pill">Session: <strong id="sessionId">connecting…</strong></span>
+    </header>
+    <main>
+      <section class="card">
+        <div>
+          <h2>1. Upload your PDF</h2>
+          <p>We will index the document so you can ask questions about its contents.</p>
+        </div>
+        <div class="upload-controls">
+          <div class="dropzone" id="dropzone">
+            <input type="file" id="fileInput" accept="application/pdf" />
+            <div class="dz-content">
+              <div class="dz-title">Drag &amp; drop your PDF here</div>
+              <div class="dz-hint">or click to browse</div>
+              <div class="dz-filename" id="fileName">No file selected yet.</div>
+            </div>
+            <div class="dz-spinner" id="dropzoneSpinner">
+              <div class="spinner"></div>
+              <div id="dropzoneStatus">Processing…</div>
+            </div>
+          </div>
+          <button id="startBtn" class="primary">Upload &amp; Index</button>
+          <span id="status" class="status-pill">Idle</span>
+        </div>
+        <div class="progress-wrapper">
+          <progress id="progress" max="100" value="0"></progress>
+          <small id="progressLabel" class="muted">Waiting for file…</small>
+        </div>
+      </section>
 
-  <div class="row">
-    <button id="newSessionBtn" class="btn">Get Session (set cookie)</button>
-    <span id="sessionId" style="margin-left:12px"></span>
+      <section class="card">
+        <div>
+          <h2>2. Ask a question</h2>
+          <p>Once indexing finishes, ask anything and we will answer using the uploaded PDF.</p>
+        </div>
+        <div class="query-controls">
+          <input type="text" id="question" placeholder="e.g. What are the renewal steps?" />
+          <button id="askBtn" class="primary" disabled>Ask</button>
+        </div>
+        <div>
+          <label for="answer"><strong>Answer</strong></label>
+          <div id="answer" class="answer-box">Upload a document to get started.</div>
+        </div>
+      </section>
+    </main>
   </div>
 
-  <div class="row">
-    <input type="file" id="fileInput" accept="application/pdf" />
-    <button id="startBtn" class="btn">Open SSE & Upload</button>
-    <span id="status" style="margin-left:12px">idle</span>
-  </div>
-
-  <div class="row">
-    Upload progress: <progress id="progress" max="100" value="0" style="width:420px; margin-left:10px;"></progress>
-  </div>
-
-  <div class="row">
-    <div><strong>SSE Log</strong></div>
-    <div id="log"></div>
-  </div>
-
-  <hr />
-
-  <div class="row">
-    <input type="text" id="question" placeholder="Ask (e.g. renewal process?)" style="width:70%" />
-    <button id="askBtn" class="btn" disabled>Ask</button>
-  </div>
-
-  <div class="row">
-    <div><strong>Answer (streaming)</strong></div>
-    <div id="answer" style="border:1px solid #ddd; padding:8px; min-height:120px; background:#fff;"></div>
-  </div>
+  <div id="toastStack" class="toast-stack"></div>
 
 <script>
-const logEl = document.getElementById('log');
 const sessionIdEl = document.getElementById('sessionId');
-const newSessionBtn = document.getElementById('newSessionBtn');
 const startBtn = document.getElementById('startBtn');
 const fileInput = document.getElementById('fileInput');
-const progress = document.getElementById('progress');
-const status = document.getElementById('status');
+const dropzone = document.getElementById('dropzone');
+const fileNameEl = document.getElementById('fileName');
+const progressEl = document.getElementById('progress');
+const progressLabel = document.getElementById('progressLabel');
+const statusEl = document.getElementById('status');
 const askBtn = document.getElementById('askBtn');
 const answerEl = document.getElementById('answer');
+const toastStack = document.getElementById('toastStack');
+const dropzoneSpinner = document.getElementById('dropzoneSpinner');
+const dropzoneStatus = document.getElementById('dropzoneStatus');
 
-function addLog(msg) {
-  const d = document.createElement('div');
-  d.textContent = `${new Date().toLocaleTimeString()} — ${msg}`;
-  logEl.appendChild(d);
-  logEl.scrollTop = logEl.scrollHeight;
+let sessionId = null;
+let es = null;
+let selectedFile = null;
+
+startBtn.disabled = true;
+
+function showToast(message, tone = 'info', duration = 4500) {
+  const toast = document.createElement('div');
+  toast.className = `toast ${tone}`;
+  toast.textContent = message;
+  toastStack.appendChild(toast);
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    setTimeout(() => toast.remove(), 220);
+  }, duration);
+}
+
+function setStatus(text, tone = 'muted') {
+  statusEl.textContent = text;
+  const toneStyles = {
+    muted: { bg: '#f8fafc', color: 'var(--muted)', border: '1px solid var(--border)' },
+    info: { bg: '#1d4ed8', color: '#fff', border: 'none' },
+    success: { bg: '#15803d', color: '#fff', border: 'none' },
+    warn: { bg: '#d97706', color: '#fff', border: 'none' },
+    error: { bg: '#dc2626', color: '#fff', border: 'none' }
+  };
+  const style = toneStyles[tone] || toneStyles.info;
+  statusEl.style.background = style.bg;
+  statusEl.style.color = style.color;
+  statusEl.style.border = style.border;
+}
+
+function updateSelectedFile(file) {
+  selectedFile = file;
+  if (file) {
+    fileNameEl.textContent = file.name;
+    dropzone.classList.add('has-file');
+    progressLabel.textContent = 'Ready to upload.';
+    startBtn.disabled = false;
+  } else {
+    fileNameEl.textContent = 'No file selected yet.';
+    dropzone.classList.remove('has-file');
+    resetProgress();
+    startBtn.disabled = true;
+  }
+}
+
+function setDropzoneLoading(active, message = 'Processing…') {
+  dropzone.classList.toggle('loading', active);
+  dropzoneStatus.textContent = message;
 }
 
 async function ensureSession() {
   try {
-    const r = await fetch('/session', { method: 'POST' });
-    const j = await r.json();
-    if (r.ok) {
-      sessionIdEl.textContent = j.session_id;
-      addLog(`session created ${j.session_id}`);
-      return j.session_id;
+    const res = await fetch('/session', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.detail || 'Failed to obtain session');
     }
-  } catch (e) {
-    addLog('session request failed: ' + e);
+    sessionId = data.session_id;
+    sessionIdEl.textContent = sessionId;
+    return sessionId;
+  } catch (err) {
+    console.error(err);
+    sessionIdEl.textContent = 'error';
+    showToast('Unable to establish a session. Refresh the page.', 'error');
+    return null;
+  }
+}
+
+function resetProgress() {
+  progressEl.value = 0;
+  progressLabel.textContent = 'Waiting for file…';
+}
+
+function openEventStream() {
+  if (es) {
+    es.close();
+  }
+  es = new EventSource('/events');
+  es.onopen = () => {
+    showToast('Connected to live updates.', 'info', 3000);
+  };
+  es.onerror = () => {
+    showToast('Connection lost. Reopen before uploading again.', 'error');
+    es.close();
+  };
+  es.onmessage = (event) => {
+    const msg = event.data;
+    if (!msg) return;
+    if (msg === 'file_uploaded') {
+      showToast('File uploaded. Indexing started.', 'info');
+      setStatus('Indexing…', 'info');
+      setDropzoneLoading(true, 'Indexing document…');
+    } else if (msg === 'ingestion_started') {
+      setStatus('Indexing…', 'info');
+      setDropzoneLoading(true, 'Indexing document…');
+    } else if (msg === 'ingestion_completed') {
+      showToast('Indexing finished. You can ask questions now.', 'success');
+      setStatus('Ready to query', 'success');
+      setDropzoneLoading(false);
+      progressLabel.textContent = 'Indexing complete.';
+      askBtn.disabled = false;
+      startBtn.disabled = false;
+    } else if (msg === '__SESSION_DESTROYED__') {
+      showToast('Session expired. Refresh to start again.', 'warn');
+      es.close();
+      askBtn.disabled = true;
+      setStatus('Session expired', 'warn');
+      setDropzoneLoading(false);
+      updateSelectedFile(null);
+    } else if (msg.toLowerCase().includes('retrying')) {
+      showToast(msg, 'warn', 6000);
+    }
+  };
+}
+
+function getSelectedFile() {
+  if (selectedFile) return selectedFile;
+  if (fileInput.files && fileInput.files[0]) {
+    return fileInput.files[0];
   }
   return null;
 }
 
-newSessionBtn.onclick = async () => {
-  const sid = await ensureSession();
-  if (sid) sessionIdEl.textContent = sid;
-};
-
-let es = null;
-startBtn.onclick = async () => {
-  const file = fileInput.files[0];
-  if (!file) return alert('Choose a PDF');
-  // ensure session exists (server sets cookie)
-  let sid = sessionIdEl.textContent;
-  if (!sid) {
-    sid = await ensureSession();
+async function handleUpload() {
+  const file = getSelectedFile();
+  if (!file) {
+    showToast('Please choose a PDF file first.', 'warn');
+    return;
+  }
+  if (!sessionId) {
+    const sid = await ensureSession();
     if (!sid) return;
   }
 
-  // open SSE to /events (cookie included)
-  if (es) es.close();
-  es = new EventSource('/events');
-  es.onopen = () => addLog('SSE open');
-  es.onmessage = (e) => {
-    addLog(`[SSE] ${e.data}`);
-    if (e.data === 'ingestion_completed') {
-      askBtn.disabled = false;
-      status.textContent = 'ready to query';
-    }
-    if (e.data === 'file_uploaded') {
-      status.textContent = 'file uploaded';
-    }
-    if (e.data && e.data.toLowerCase().includes('retrying')) {
-      // show toast-like
-      const t = document.createElement('div');
-      t.className = 'toast warn';
-      t.textContent = e.data;
-      document.body.appendChild(t);
-      setTimeout(()=> t.remove(), 6000);
-    }
-    if (e.data === '__SESSION_DESTROYED__') {
-      addLog('session destroyed by server (TTL expired)');
-      es.close();
-    }
-  };
-  es.onerror = () => {
-    addLog('SSE error/closed');
-  };
+  openEventStream();
+  await new Promise((resolve) => setTimeout(resolve, 200));
 
-  // small wait to ensure session is registered server-side
-  await new Promise(r => setTimeout(r, 200));
-
-  // upload
-  const form = new FormData();
-  form.append('file', file, file.name);
-
-  const xhr = new XMLHttpRequest();
-  xhr.open('POST', '/upload', true);
-  xhr.upload.onprogress = (evt) => {
-    if (evt.lengthComputable) {
-      const pct = Math.round((evt.loaded / evt.total) * 100);
-      progress.value = pct;
-      status.textContent = `Uploading ${pct}%`;
-    }
-  };
-  xhr.onload = () => {
-    if (xhr.status >= 200 && xhr.status < 300) {
-      addLog('[HTTP] upload accepted by server');
-      status.textContent = 'ingestion started';
-    } else {
-      addLog(`[HTTP] upload failed: ${xhr.status}`);
-      status.textContent = 'upload failed';
-    }
-  };
-  xhr.onerror = () => addLog('[HTTP] upload error');
-  xhr.send(form);
-  addLog('[HTTP] upload started');
   askBtn.disabled = true;
-};
+  startBtn.disabled = true;
+  answerEl.textContent = 'Indexing in progress…';
+  setStatus('Uploading…', 'info');
+  progressLabel.textContent = 'Uploading file…';
+  progressEl.value = 0;
+  setDropzoneLoading(true, 'Uploading file…');
 
-askBtn.onclick = async () => {
-  const q = document.getElementById('question').value.trim();
-  if (!q) return alert('Type a question');
+  const formData = new FormData();
+  formData.append('file', file, file.name);
+
+  await new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/upload', true);
+    xhr.upload.onprogress = (evt) => {
+      if (evt.lengthComputable) {
+        const pct = Math.round((evt.loaded / evt.total) * 100);
+        progressEl.value = pct;
+        progressLabel.textContent = `Uploaded ${pct}%`;
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        progressLabel.textContent = 'File uploaded. Indexing…';
+        setDropzoneLoading(true, 'Indexing document…');
+        resolve();
+      } else {
+        showToast(`Upload failed (${xhr.status}).`, 'error');
+        setStatus('Upload failed', 'error');
+        setDropzoneLoading(false);
+        startBtn.disabled = false;
+        reject(new Error('upload failed'));
+      }
+    };
+    xhr.onerror = () => {
+      showToast('Upload error. Check your connection.', 'error');
+      setStatus('Upload error', 'error');
+      setDropzoneLoading(false);
+      startBtn.disabled = false;
+      reject(new Error('upload error'));
+    };
+    xhr.send(formData);
+  }).catch(() => {});
+}
+
+async function handleQuery() {
+  const questionInput = document.getElementById('question');
+  const query = questionInput.value.trim();
+  if (!query) {
+    showToast('Please type your question first.', 'warn');
+    questionInput.focus();
+    return;
+  }
+
+  askBtn.disabled = true;
+  setStatus('Answering…', 'info');
   answerEl.textContent = '';
-  addLog('query: ' + q);
-  // POST form
+
   const form = new FormData();
-  form.append('question', q);
+  form.append('question', query);
   form.append('k', '5');
 
   try {
     const resp = await fetch('/query', { method: 'POST', body: form });
     if (!resp.ok) {
       const txt = await resp.text();
-      addLog('query failed: ' + resp.status + ' ' + txt);
-      return;
+      throw new Error(txt || 'Query failed');
     }
+
     const reader = resp.body.getReader();
-    const dec = new TextDecoder();
+    const decoder = new TextDecoder();
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      const chunk = dec.decode(value, { stream: true });
+      const chunk = decoder.decode(value, { stream: true });
       answerEl.textContent += chunk;
       answerEl.scrollTop = answerEl.scrollHeight;
     }
-    addLog('query finished');
-  } catch (e) {
-    addLog('query error: ' + e);
+    setStatus('Ready to query', 'success');
+    askBtn.disabled = false;
+    showToast('Answer ready.', 'success', 3000);
+  } catch (err) {
+    console.error(err);
+    showToast('Unable to answer. Try again.', 'error');
+    setStatus('Ready to query', 'warn');
+    askBtn.disabled = false;
+  } finally {
+    setDropzoneLoading(false);
   }
-};
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+  resetProgress();
+  const sid = await ensureSession();
+  if (sid) {
+    showToast('Session established.', 'success', 3000);
+  }
+});
+
+fileInput.addEventListener('change', (event) => {
+  const file = event.target.files && event.target.files[0];
+  updateSelectedFile(file || null);
+});
+
+dropzone.addEventListener('click', () => {
+  fileInput.click();
+});
+
+dropzone.addEventListener('dragover', (event) => {
+  event.preventDefault();
+  dropzone.classList.add('dragover');
+});
+
+dropzone.addEventListener('dragleave', () => {
+  dropzone.classList.remove('dragover');
+});
+
+dropzone.addEventListener('drop', (event) => {
+  event.preventDefault();
+  dropzone.classList.remove('dragover');
+  const file = event.dataTransfer.files && event.dataTransfer.files[0];
+  if (!file) return;
+  if (file.type !== 'application/pdf') {
+    showToast('Only PDF files are supported.', 'warn');
+    return;
+  }
+  const dt = new DataTransfer();
+  dt.items.add(file);
+  fileInput.files = dt.files;
+  updateSelectedFile(file);
+});
+
+startBtn.addEventListener('click', handleUpload);
+askBtn.addEventListener('click', handleQuery);
 </script>
 </body>
 </html>
