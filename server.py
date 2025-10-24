@@ -1,28 +1,31 @@
 # fastapi_app.py
-# pip install fastapi uvicorn aiofiles python-multipart google-genai langchain-google-genai langchain-community faiss-cpu pypdf
+# pip install fastapi uvicorn aiofiles python-multipart pypdf faiss-cpu langchain-google-genai langchain-community google-genai
 
 import os
 import asyncio
 import logging
-from typing import Dict, Optional
+import random
+from typing import Dict, Optional, List
 from uuid import uuid4
+from io import BytesIO
 import dotenv
 dotenv.load_dotenv()
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi import FastAPI, Form, Request, UploadFile, File, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-import aiofiles
 
-# AI libs (make sure GOOGLE_API_KEY set in env)
+import aiofiles
 import numpy as np
 from pypdf import PdfReader
 import faiss
+
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from fastapi.staticfiles import StaticFiles
 
-# Gemini Streaming
+# Gemini streaming
 from google import genai
 from google.genai import types
 
@@ -30,117 +33,89 @@ from google.genai import types
 # Logging
 # -----------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger("ingest_app")
+logger = logging.getLogger("app")
 
 # -----------------------
-# App + CORS
+# App and CORS
 # -----------------------
 app = FastAPI()
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["*"],  # change to your front-end origin in production
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+#     allow_credentials=True,
+# )
+
+ALLOWED_ORIGINS = [
+    "http://127.0.0.1:5500",   # your dev static server
+    "http://127.0.0.1:5501",   # your dev static server
+    "http://localhost:5500",
+    "http://localhost:5173",   # vite default
+    "http://localhost:3000",   # react dev server etc
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # use your front-end origin in production
+    allow_origins=ALLOWED_ORIGINS,   # <- not "*"
+    allow_credentials=True,          # must be True to allow cookies
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=True,
 )
 
 # -----------------------
-# In-memory registry:
-# file_id -> {'queue': asyncio.Queue, 'vs': FAISS or None, 'emb': Embeddings or None}
+# Registry keyed by session_id (one session per user)
+# session structure:
+# {
+#   "queue": asyncio.Queue,
+#   "vs": FAISS | None,
+#   "emb": Embeddings | None,
+#   "ingestion_task": asyncio.Task | None,
+#   "ingestion_done": bool,
+#   "ttl_task": asyncio.Task | None
+# }
 # -----------------------
 registry: Dict[str, Dict] = {}
 
-MAX_FILE_BYTES = 200 * 1024 * 1024  # 200 MB
+# TTL in seconds
+SESSION_TTL = 15 * 60  # 15 minutes
+
+MAX_FILE_BYTES = 200 * 1024 * 1024  # 200MB
+
 
 # -----------------------
-# Helpers: PDF load & chunking (synchronous blocking; we call via to_thread)
+# Utilities: session management
 # -----------------------
-# put at top of file
-from io import BytesIO
-from typing import List
-from pypdf import PdfReader
+def make_session_id() -> str:
+    return uuid4().hex
 
-def load_pdf_pages_from_bytes(pdf_bytes: bytes) -> List[str]:
-    """
-    Safely load PDF pages from raw bytes and return list[str] (one element per page).
-    Raises a ValueError if bytes don't look like a PDF or PdfReader fails.
-    """
-    if not pdf_bytes or len(pdf_bytes) < 5:
-        raise ValueError("Empty or too-small PDF bytes")
-
-    # quick sanity check for PDF header
-    if not pdf_bytes.startswith(b"%PDF"):
-        raise ValueError("Uploaded file does not look like a PDF (missing %PDF header)")
-
-    try:
-        with BytesIO(pdf_bytes) as bio:
-            reader = PdfReader(bio)
-            # handle encrypted PDFs (try empty password)
-            if getattr(reader, "is_encrypted", False):
-                try:
-                    reader.decrypt("")  # try empty password
-                except Exception:
-                    raise ValueError("PDF is encrypted; cannot parse")
-
-            pages = [page.extract_text() or "" for page in reader.pages]
-            return pages
-    except Exception as e:
-        # raise a clear ValueError so caller can catch and signal a friendly error
-        raise ValueError(f"Pdf parsing failed: {e}")
-
-
-def chunk_pages_to_documents(pages, pdf_path: str, pages_per_chunk: int, overlap_pages: int = 1):
-    if pages_per_chunk <= 0:
-        raise ValueError("pages_per_chunk must be > 0")
-    if overlap_pages < 0:
-        raise ValueError("overlap_pages must be >= 0")
-    step = pages_per_chunk - overlap_pages
-    if step <= 0:
-        raise ValueError("overlap_pages must be smaller than pages_per_chunk")
-
-    chunks = []
-    titles = []
-    idx = 0
-    total_pages = len(pages)
-    while idx < total_pages:
-        start_idx = idx
-        end_idx = min(idx + pages_per_chunk, total_pages)
-        start_page = start_idx + 1
-        end_page = end_idx
-        text = "\n".join(pages[start_idx:end_idx]).strip()
-        if text:
-            title = f"{pdf_path} pages {start_page}-{end_page}"
-            titles.append(title)
-            chunks.append(Document(page_content=text, metadata={"page_range": f"{start_page}-{end_page}", "source": pdf_path, "title": title}))
-        idx += step
-    return chunks, titles
-
-# -----------------------
-# Embedding + FAISS init (blocking, run in thread)
-# -----------------------
-def init_vectorstore_sync(embedding_model: str = "models/gemini-embedding-001"):
-    emb = GoogleGenerativeAIEmbeddings(model=embedding_model, google_api_key=os.getenv("GOOGLE_API_KEY"))
-    dim = len(emb.embed_query("probe"))
-    index = faiss.IndexFlatL2(dim)
-    vs = FAISS(embedding_function=emb, index=index, docstore=InMemoryDocstore(), index_to_docstore_id={})
-    return emb, vs
-
-# -----------------------
-# Helper to create registry entry
-# -----------------------
-def create_registry_entry(file_id: str):
+def create_session() -> str:
+    sid = make_session_id()
     q = asyncio.Queue(maxsize=64)
-    registry[file_id] = {"queue": q, "vs": None, "emb": None}
-    return registry[file_id]
+    registry[sid] = {
+        "queue": q,
+        "vs": None,
+        "emb": None,
+        "ingestion_task": None,
+        "ingestion_done": False,
+        "ttl_task": None,
+    }
+    logger.info(f"session_created: {sid}")
+    # create TTL watcher
+    registry[sid]["ttl_task"] = asyncio.create_task(session_ttl_watcher(sid))
+    return sid
 
-def get_registry_entry(file_id: str):
-    return registry.get(file_id)
+def get_session_id_from_request(req: Request) -> Optional[str]:
+    return req.cookies.get("session_id")
+
+def get_entry(session_id: str) -> Optional[Dict]:
+    return registry.get(session_id)
 
 async def safe_put(queue: asyncio.Queue, msg: str):
     try:
         queue.put_nowait(msg)
     except asyncio.QueueFull:
-        # drop oldest and push new
+        # drop one and enqueue
         try:
             _ = queue.get_nowait()
         except Exception:
@@ -150,22 +125,127 @@ async def safe_put(queue: asyncio.Queue, msg: str):
         except Exception:
             pass
 
+async def destroy_session(session_id: str):
+    """Destroy the vectorstore and cancel background tasks for a session."""
+    entry = registry.get(session_id)
+    if not entry:
+        return
+    logger.info(f"destroy_session: {session_id}")
+    # cancel ingestion task if running
+    itask = entry.get("ingestion_task")
+    if itask and not itask.done():
+        try:
+            itask.cancel()
+        except Exception:
+            logger.warning("failed to cancel ingestion task")
+    # cancel ttl task
+    ttask = entry.get("ttl_task")
+    if ttask and not ttask.done():
+        try:
+            ttask.cancel()
+        except Exception:
+            pass
+    # dereference vs and emb
+    entry["vs"] = None
+    entry["emb"] = None
+    entry["ingestion_task"] = None
+    entry["ingestion_done"] = False
+    # notify queue and remove
+    q: asyncio.Queue = entry.get("queue")
+    if q:
+        try:
+            await safe_put(q, "__SESSION_DESTROYED__")
+        except Exception:
+            pass
+    registry.pop(session_id, None)
+    logger.info(f"session_destroyed: {session_id}")
+
+async def reset_session_ttl(session_id: str):
+    """Cancel previous TTL task and start a fresh watcher."""
+    entry = registry.get(session_id)
+    if not entry:
+        return
+    t = entry.get("ttl_task")
+    if t and not t.done():
+        try:
+            t.cancel()
+        except Exception:
+            pass
+    entry["ttl_task"] = asyncio.create_task(session_ttl_watcher(session_id))
+
+async def session_ttl_watcher(session_id: str):
+    """Wait SESSION_TTL seconds, then destroy session."""
+    try:
+        await asyncio.sleep(SESSION_TTL)
+        logger.info(f"session_ttl_expired: {session_id}")
+        await destroy_session(session_id)
+    except asyncio.CancelledError:
+        # TTL was reset/cancelled
+        logger.debug(f"ttl_watcher_cancelled: {session_id}")
+    except Exception as e:
+        logger.exception("ttl_watcher_error")
+
 # -----------------------
-# is_rate helper
+# PDF helpers
 # -----------------------
+def load_pdf_pages_from_bytes(pdf_bytes: bytes) -> List[str]:
+    if not pdf_bytes or len(pdf_bytes) < 5:
+        raise ValueError("Empty or invalid PDF bytes")
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("Uploaded file does not look like a PDF (missing %PDF header)")
+    try:
+        with BytesIO(pdf_bytes) as bio:
+            reader = PdfReader(bio)
+            if getattr(reader, "is_encrypted", False):
+                try:
+                    reader.decrypt("")
+                except Exception:
+                    raise ValueError("PDF is encrypted; cannot parse")
+            pages = [page.extract_text() or "" for page in reader.pages]
+            return pages
+    except Exception as e:
+        raise ValueError(f"Pdf parsing failed: {e}")
+
+def chunk_pages_to_documents(pages: List[str], pdf_path: str, pages_per_chunk: int, overlap_pages: int = 1):
+    if pages_per_chunk <= 0:
+        raise ValueError("pages_per_chunk must be > 0")
+    step = pages_per_chunk - overlap_pages
+    if step <= 0:
+        raise ValueError("overlap_pages must be smaller than pages_per_chunk")
+    chunks = []
+    idx = 0
+    total = len(pages)
+    while idx < total:
+        start = idx
+        end = min(idx + pages_per_chunk, total)
+        text = "\n".join(pages[start:end]).strip()
+        if text:
+            chunks.append(Document(page_content=text, metadata={"page_range": f"{start+1}-{end}", "source": pdf_path, "title": f"{pdf_path} pages {start+1}-{end}"}))
+        idx += step
+    return chunks, []
+
+# -----------------------
+# Embeddings & FAISS init
+# -----------------------
+def init_vectorstore_sync(embedding_model: str = "models/gemini-embedding-001"):
+    emb = GoogleGenerativeAIEmbeddings(model=embedding_model, google_api_key=os.environ.get("GOOGLE_API_KEY"))
+    dim = len(emb.embed_query("probe"))
+    index = faiss.IndexFlatL2(dim)
+    vs = FAISS(embedding_function=emb, index=index, docstore=InMemoryDocstore(), index_to_docstore_id={})
+    return emb, vs
+
 def is_rate_limit_error(exc: Exception) -> bool:
     s = str(exc).lower()
     return ("429" in s) or ("rate" in s and "limit" in s) or ("throttl" in s)
 
 # -----------------------
-# safe embed (runs embedding in thread, sends only retry messages via status_put)
+# Embedding with backoff — sends retry messages via status_put
 # -----------------------
-import random, time
 async def safe_embed_documents_async(
     emb,
     texts,
     titles,
-    status_put,  # async callable: await status_put(msg)
+    status_put,
     task_type="retrieval_document",
     batch_size=None,
     max_retries=6,
@@ -181,7 +261,6 @@ async def safe_embed_documents_async(
             kwargs = {"batch_size": batch_size}
             if task_type: kwargs["task_type"] = task_type
             if titles is not None: kwargs["titles"] = titles
-            # embed in thread (blocking)
             vecs = await asyncio.to_thread(emb.embed_documents, texts, **kwargs)
             return vecs
         except Exception as e:
@@ -190,13 +269,10 @@ async def safe_embed_documents_async(
             delay = min(max_delay, initial_delay * (multiplier ** (attempt - 1)))
             jitter = random.uniform(0, delay * 0.1)
             total_sleep = delay + jitter
-            # LOG always
-            logger.warning(f"embed_documents attempt {attempt}/{max_retries} failed: {e}; sleeping {total_sleep:.1f}s")
-            # Only send SSE messages when it's a rate-limit/backoff situation (per your request)
+            logger.warning(f"embed attempt {attempt}/{max_retries} failed: {e}; sleeping {total_sleep:.1f}s")
+            # Only send SSE message for rate-limit/backoff
             if rate and status_put:
-                # concise message
-                short = str(e)[:200]
-                await status_put(f"retrying in {int(total_sleep)}s (attempt {attempt}/{max_retries}) - {short}")
+                await status_put(f"retrying in {int(total_sleep)}s (attempt {attempt}/{max_retries}) - {str(e)[:200]}")
             if attempt >= max_retries:
                 logger.error("embedding failed after retries")
                 raise
@@ -204,219 +280,277 @@ async def safe_embed_documents_async(
     raise RuntimeError("unreachable")
 
 # -----------------------
-# ingestion background task (calls safe_embed_documents_async)
+# ingestion task
 # -----------------------
-async def ingest_documents_with_backoff_async(
-    emb,
-    vs,
-    docs,
-    ids,
-    status_put,  # async callable
-    batch=5,
-    max_retries=6,
-    initial_delay=1.0,
-    multiplier=2.0,
-    max_delay=60.0,
-    task_type="retrieval_document",
-):
+async def ingest_documents_with_backoff_async(emb, vs, docs, ids, status_put, batch=5, **backoff_kwargs):
     assert len(docs) == len(ids)
     total = len(docs)
-    logger.info(f"Start ingestion: {total} chunks, batch={batch}")
+    logger.info(f"ingestion_started: chunks={total} batch={batch}")
+    # notify SSE ingestion started
+    await status_put("ingestion_started")
     for i in range(0, total, batch):
         batch_docs = docs[i:i+batch]
         texts = [d.page_content for d in batch_docs]
         titles = [d.metadata.get("title") for d in batch_docs]
-        # Note: per your request we do NOT broadcast normal progress messages over SSE,
-        # only retry notifications inside safe_embed_documents_async will be sent via status_put.
-
-        vecs = await safe_embed_documents_async(
-            emb=emb,
-            texts=texts,
-            titles=titles,
-            status_put=status_put,
-            task_type=task_type,
-            batch_size=len(texts),
-            max_retries=max_retries,
-            initial_delay=initial_delay,
-            multiplier=multiplier,
-            max_delay=max_delay,
-        )
-
+        vecs = await safe_embed_documents_async(emb, texts, titles, status_put, batch_size=len(texts), **backoff_kwargs)
         vecs_np = np.asarray(vecs, dtype="float32")
-        # add vectors to FAISS in thread
         await asyncio.to_thread(vs.index.add, vecs_np)
         base_idx = vs.index.ntotal - len(batch_docs)
         for j, d in enumerate(batch_docs):
             doc_id = ids[i+j]
             vs.docstore.add({doc_id: d})
             vs.index_to_docstore_id[base_idx + j] = doc_id
-
-        logger.info(f"Indexed batch {i//batch + 1}: added {len(batch_docs)} vectors (index size {vs.index.ntotal})")
-    logger.info("Ingestion complete")
+        logger.info(f"indexed batch {(i//batch)+1}: added {len(batch_docs)} vectors (index size {vs.index.ntotal})")
+    logger.info("ingestion_completed")
+    await status_put("ingestion_completed")
+    # mark ingestion done in registry by caller
 
 # -----------------------
-# SSE endpoint (one listener per file_id)
+# SSE endpoint: uses session cookie
 # -----------------------
-@app.get("/events/{file_id}")
-async def events(file_id: str):
-    if get_registry_entry(file_id) is not None:
-        # block multiple listeners - minimal approach
-        raise HTTPException(status_code=409, detail="Listener already connected for this file_id")
-
-    entry = create_registry_entry(file_id)
+@app.get("/events")
+async def events(request: Request):
+    session_id = get_session_id_from_request(request)
+    if not session_id:
+        # create session and set cookie
+        session_id = create_session()
+        # return streaming response but set cookie via header
+        entry = get_entry = registry[session_id]
+        q = entry["queue"]
+        async def event_gen():
+            try:
+                while True:
+                    msg = await q.get()
+                    yield f"data: {msg}\n\n"
+                    if msg == "__SESSION_DESTROYED__":
+                        break
+            finally:
+                # cleanup session on disconnect
+                if registry.get(session_id):
+                    # keep session but don't destroy immediately; TTL will handle empties
+                    pass
+        headers = {
+                    "Set-Cookie": (
+                        f"session_id={session_id}; Path=/; HttpOnly; SameSite=None; Secure"
+                    )
+                }
+        return StreamingResponse(event_gen(), media_type="text/event-stream", headers=headers)
+    # existing session
+    entry = registry.get(session_id)
+    if not entry:
+        # session expired
+        raise HTTPException(status_code=400, detail="Session invalid or expired; refresh to get new session")
+    # enforce one listener per session
     q = entry["queue"]
+    # If queue already has a connected listener? we don't track connected count; to keep it simple allow single connect by marking a flag:
+    if entry.get("_listener_active"):
+        raise HTTPException(status_code=409, detail="Listener already connected for this session")
+    entry["_listener_active"] = True
 
-    async def event_generator():
+    async def event_gen():
         try:
             while True:
                 msg = await q.get()
-                if msg is None:
-                    continue
                 yield f"data: {msg}\n\n"
-                # we do not send completion markers by default; it's optional.
-                # If a component wants to notify completion it can push "__DONE__" and client can close.
-                if msg == "__DONE__":
+                if msg == "__SESSION_DESTROYED__":
                     break
         finally:
-            # cleanup
-            registry.pop(file_id, None)
+            entry["_listener_active"] = False
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 # -----------------------
-# Upload endpoint: read pdf into memory, start ingestion background task and store vs/emb in registry
+# session endpoint (explicit)
+# -----------------------
+@app.post("/session")
+async def session_endpoint():
+    sid = create_session()
+    resp = JSONResponse({"session_id": sid})
+    resp.set_cookie(
+        "session_id",
+        sid,
+        path="/",
+        httponly=True,
+        samesite="none",
+        secure=True,  # required when SameSite=None
+    )
+    return resp
+
+# -----------------------
+# Upload endpoint (no session_id param — uses cookie to associate)
 # -----------------------
 @app.post("/upload")
-async def upload(file: UploadFile = File(...), file_id: Optional[str] = Form(None)):
-    if file_id is None:
-        raise HTTPException(status_code=400, detail="file_id is required. Connect to /events/{file_id} first")
+async def upload(request: Request, file: UploadFile = File(...)):
+    # print(request)
+    # print(request.headers)
+    print(request.cookies)
+    session_id = get_session_id_from_request(request)
+    if not session_id or session_id not in registry:
+        raise HTTPException(status_code=400, detail="No session; call /session or open /events to get one")
+    entry = registry[session_id]
+    q: asyncio.Queue = entry["queue"]
 
-    entry = get_registry_entry(file_id)
-    if entry is None:
-        raise HTTPException(status_code=400, detail="No active SSE listener for this file_id. Connect to /events/{file_id} first")
-
-    q = entry["queue"]
-
-    # validate
+    # file checks
     if file.content_type != "application/pdf":
-        # only retry messages go out via SSE — we will log and send an error message as SSE as well (it's allowed)
         await safe_put(q, "error: only PDF allowed")
-        await safe_put(q, "__DONE__")
-        logger.error(f"Upload rejected: non-pdf content_type={file.content_type} for file_id={file_id}")
+        logger.error(f"upload_rejected_nonpdf session={session_id} content_type={file.content_type}")
         raise HTTPException(status_code=400, detail="Only PDF allowed")
-
-    # read bytes
     try:
         pdf_bytes = await file.read()
         if len(pdf_bytes) > MAX_FILE_BYTES:
             await safe_put(q, "error: file too large")
-            await safe_put(q, "__DONE__")
-            logger.error(f"Upload too large for file_id={file_id} size={len(pdf_bytes)}")
+            logger.error(f"upload_too_large session={session_id} size={len(pdf_bytes)}")
             raise HTTPException(status_code=413, detail="File too large")
     except Exception as e:
         await safe_put(q, f"error: reading upload failed: {str(e)}")
-        await safe_put(q, "__DONE__")
         logger.exception("upload read failed")
         raise HTTPException(status_code=500, detail="upload read failed")
 
-    logger.info(f"file_received: file_id={file_id} size={len(pdf_bytes)}")
-    # NOTE: per your request, we do NOT broadcast file_received to SSE except for retry messages. Logging is present.
+    logger.info(f"file_uploaded: session={session_id} size={len(pdf_bytes)}")
+    # notify SSE that file uploaded
+    await safe_put(q, "file_uploaded")
 
-    # parse pages (blocking) in a thread
+    # If a previous vectorstore exists for this session, delete it (single-file per session)
+    if entry.get("vs") is not None:
+        logger.info(f"clearing previous vectorstore for session={session_id}")
+        # cancel ingestion task if running
+        it = entry.get("ingestion_task")
+        if it and not it.done():
+            try:
+                it.cancel()
+            except Exception:
+                pass
+        # dereference
+        entry["vs"] = None
+        entry["emb"] = None
+        entry["ingestion_done"] = False
+
+    # parse pdf pages (blocking) in thread
     try:
         pages = await asyncio.to_thread(load_pdf_pages_from_bytes, pdf_bytes)
-    except Exception as e:
+    except ValueError as e:
         await safe_put(q, f"error: pdf parsing failed: {str(e)}")
-        await safe_put(q, "__DONE__")
+        await safe_put(q, "__SESSION_DESTROYED__")
         logger.exception("pdf parse failed")
-        raise HTTPException(status_code=400, detail="PDF parse failed")
+        raise HTTPException(status_code=400, detail=f"PDF parse failed: {str(e)}")
 
     # chunk
     PAGES_PER_CHUNK = 5
     OVERLAP = 1
-    docs, titles = chunk_pages_to_documents(pages, "uploaded.pdf", PAGES_PER_CHUNK, OVERLAP)
-    ids = [str(uuid4()) for _ in docs]
+    docs, _ = chunk_pages_to_documents(pages, "uploaded.pdf", PAGES_PER_CHUNK, OVERLAP)
+    ids = [uuid4().hex for _ in docs]
 
-    # init embeddings + FAISS (blocking) in thread
+    # init embeddings+FAISS
     try:
         emb, vs = await asyncio.to_thread(init_vectorstore_sync, "models/gemini-embedding-001")
     except Exception as e:
         await safe_put(q, f"error: init embeddings failed: {str(e)}")
-        await safe_put(q, "__DONE__")
+        await safe_put(q, "__SESSION_DESTROYED__")
         logger.exception("init_vectorstore failed")
         raise HTTPException(status_code=500, detail="embedding init failed")
 
-    # store vs & emb in registry so /query can access it
+    # save to session registry
     entry["vs"] = vs
     entry["emb"] = emb
+    entry["ingestion_done"] = False
+    # reset TTL
+    await reset_session_ttl(session_id)
 
-    logger.info(f"indexing_start: file_id={file_id} chunks={len(docs)}")
+    # start ingestion in background
+    ingestion_task = asyncio.create_task(
+        ingest_documents_with_backoff_async(
+            emb=emb,
+            vs=vs,
+            docs=docs,
+            ids=ids,
+            status_put=lambda m: safe_put(q, m),
+            batch=2,
+            max_retries=6,
+            initial_delay=5,
+            multiplier=2,
+            max_delay=60,
+        )
+    )
+    entry["ingestion_task"] = ingestion_task
 
-    # start ingestion in background — ingestion will send only retry messages via safe_put
-    asyncio.create_task(ingest_documents_with_backoff_async(
-        emb=emb,
-        vs=vs,
-        docs=docs,
-        ids=ids,
-        status_put=lambda msg: safe_put(q, msg),
-        batch=2,
-        max_retries=6,
-        initial_delay=5,
-        multiplier=2,
-        max_delay=60,
-        task_type="retrieval_document",
-    ))
+    # ingestion_started message is already sent inside ingestion task; but send again for reliability
+    await safe_put(q, "ingestion_started")
 
-    return JSONResponse({"status": "ingestion_started", "file_id": file_id, "chunks": len(docs)})
+    # when ingestion completes, mark done in registry and push final SSE message; we attach a callback
+    async def _on_ingest_done(task: asyncio.Task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            logger.info("ingestion_task cancelled")
+            return
+        except Exception:
+            logger.exception("ingestion task failed")
+            await safe_put(q, "error: ingestion failed")
+            return
+        entry = registry.get(session_id)
+        if entry:
+            entry["ingestion_done"] = True
+            # ingestion task already pushes 'ingestion_completed', but ensure it's present
+            await safe_put(q, "ingestion_completed")
+            logger.info(f"ingestion_complete session={session_id}")
+            # reset TTL after ingestion so session lasts another TTL period
+            await reset_session_ttl(session_id)
+
+    # schedule watcher
+    asyncio.create_task(_on_ingest_done(ingestion_task))
+
+    return JSONResponse({"status": "ingestion_started", "session_id": session_id, "chunks": len(docs)})
+
 
 # -----------------------
-# Utility to combine docs -> context
-# -----------------------
-def combine_docs_to_context(docs):
-    context = ""
-    for i, d in enumerate(docs):
-        context += f"page: {d.metadata.get('page_range')} | {d.metadata.get('source')}\n"
-        context += f"{d.page_content}\n\n"
-    return context
-
-# -----------------------
-# QUERY endpoint: runs retrieval on in-memory vs for given file_id and streams Gemini response
-# returns a streaming text/plain response (chunks appended as generated)
+# Query endpoint — uses session cookie, only allowed after ingestion_done
+# Also sends SSE message 'processing_query' while it runs
 # -----------------------
 @app.post("/query")
-async def query(file_id: str = Form(...), question: str = Form(...), k: int = Form(5)):
-    entry = get_registry_entry(file_id)
-    if entry is None or entry.get("vs") is None or entry.get("emb") is None:
-        raise HTTPException(status_code=400, detail="No index available for this file_id yet (or ingestion not started)")
+async def query(
+    request: Request,
+    question: str = Form(...),
+    k: int = Form(5),
+):
+    session_id = get_session_id_from_request(request)
+    if not session_id or session_id not in registry:
+        raise HTTPException(status_code=400, detail="No session; call /session or open /events to get one")
+    entry = registry[session_id]
+    q: asyncio.Queue = entry["queue"]
 
-    vs: FAISS = entry["vs"]
-    emb = entry["emb"]
+    if not entry.get("ingestion_done", False):
+        raise HTTPException(status_code=400, detail="Indexing not complete yet; wait until ingestion_finished")
 
-    logger.info(f"query_received: file_id={file_id} question={question} k={k}")
+    vs: FAISS = entry.get("vs")
+    emb = entry.get("emb")
+    if not vs or not emb:
+        raise HTTPException(status_code=500, detail="Vector store unavailable")
 
-    # 1) embed the query (blocking) in thread
+    # send SSE processing notification
+    await safe_put(q, "processing_query")
+
+    logger.info(f"query_received session={session_id} question={question} k={k}")
+
+    # embed query
     try:
         qvec = await asyncio.to_thread(emb.embed_query, question, task_type="retrieval_query")
     except Exception as e:
         logger.exception("embed_query failed")
         raise HTTPException(status_code=500, detail="query embed failed")
 
-    # 2) run similarity search using FAISS in thread (returns documents)
+    # search (use thread)
     def search_sync():
-        # use wrapper that accepts raw vector if available
         try:
-            results = vs.similarity_search_with_score(question, k=k)  # fallback if embed inside
-            # results is list of (Document, score) OR list of Document depending on version
+            # prefer similarity_search_with_score
+            results = vs.similarity_search_with_score(question, k=k)
             if results and isinstance(results[0], tuple):
                 docs = [r[0] for r in results]
             else:
                 docs = results
             return docs
         except Exception:
-            # fallback: try similarity_search_by_vector_with_relevance_scores
             try:
                 hits = vs.similarity_search_by_vector_with_relevance_scores(qvec, k=k)
-                # hits = list of (Document, score)
                 return [h[0] for h in hits]
             except Exception as e:
                 logger.exception("faiss search failed")
@@ -428,15 +562,17 @@ async def query(file_id: str = Form(...), question: str = Form(...), k: int = Fo
         logger.exception("search failed")
         raise HTTPException(status_code=500, detail="search failed")
 
-    context = combine_docs_to_context(docs)
-    logger.info(f"query_context_built: file_id={file_id} context_len={len(context)}")
+    context = ""
+    for d in docs:
+        context += f"page: {d.metadata.get('page_range')} | {d.metadata.get('source')}\n{d.page_content}\n\n"
 
-    # 3) Stream responses from Gemini model via genai streaming API (sync iterator)
+    logger.info(f"query_context_built session={session_id} len={len(context)}")
+
+    # stream Gemini response
     def gen_stream():
         client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
         model = "gemini-2.5-flash"
-        # Build system instruction with context (keep it concise to avoid token explosion)
-        system_text = f"Answer the question using only the provided context. Context follows:\n{context}\n---\nIf context does not contain the answer, respond with 'I don't know.'"
+        system_text = f"Answer using ONLY the context below. If not available, respond 'I don't know.'\n\n{context}"
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=question)])]
         cfg = types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(thinking_budget=0),
@@ -449,13 +585,16 @@ async def query(file_id: str = Form(...), question: str = Form(...), k: int = Fo
             ],
         )
         try:
-            # stream and yield text chunks
             for chunk in client.models.generate_content_stream(model=model, contents=contents, config=cfg):
-                # chunk.text may be None for some event types; handle
                 if hasattr(chunk, "text") and chunk.text:
                     yield chunk.text
         except Exception as e:
             logger.exception("genai streaming failed")
             yield f"\n\n[error during generation: {str(e)}]"
-    # Return as streaming plain text (front-end will append chunks)
+
+    # reset TTL because user is active
+    await reset_session_ttl(session_id)
+
     return StreamingResponse(gen_stream(), media_type="text/plain; charset=utf-8")
+
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
