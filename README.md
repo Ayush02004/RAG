@@ -1,7 +1,10 @@
 # Document Q&A RAG
 
 An end-to-end retrieval augmented generation (RAG) demo that lets you upload a PDF, build a session-scoped FAISS index, and chat with a Gemini-powered assistant about the document in real time.
-
+# Free hosted instance:
+```
+https://rag-yri6.onrender.com/RAG.html
+```
 ## Features
 
 - Cookie-based session tracking so each browser tab keeps an isolated vector store and API key.
