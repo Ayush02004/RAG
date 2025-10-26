@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <title>Document Q&A</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Crect width='24' height='24' rx='6' fill='%232563eb'/%3E%3Cpath d='M8 5h7l3 3v11a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z' stroke='%23fff' stroke-width='1.6' stroke-linejoin='round'/%3E%3Cpath d='M13 5v4h4' stroke='%23fff' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M10 12h6M10 15h6' stroke='%23fff' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E" />
   <style>
     :root {
       color-scheme: light;
@@ -47,6 +48,30 @@
       flex-wrap: wrap;
       align-items: center;
       gap: 16px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex: 1 1 auto;
+    }
+
+    .brand-icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, var(--accent), #5b21b6);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 12px 24px rgba(37, 99, 235, 0.25);
+      flex-shrink: 0;
+    }
+
+    .brand-icon svg {
+      width: 24px;
+      height: 24px;
     }
 
     header h1 {
@@ -387,7 +412,17 @@
 <body>
   <div class="app">
     <header>
-      <h1>Document Q&A Assistant</h1>
+      <div class="brand">
+        <span class="brand-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M8 3h6l5 5v13a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round" />
+            <path d="M14 3v5h5" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M10 12h6" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" />
+            <path d="M10 16h6" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" />
+          </svg>
+        </span>
+        <h1>Document Q&A RAG</h1>
+      </div>
       <a class="github-link" href="https://github.com/Ayush02004/RAG" target="_blank" rel="noopener">GitHub</a>
       <span class="session-pill">Session: <strong id="sessionId">connecting…</strong></span>
     </header>
