@@ -2,6 +2,20 @@
 
 An end-to-end retrieval augmented generation (RAG) demo that lets you upload a PDF, build a session-scoped FAISS index, and chat with a Gemini-powered assistant about the document in real time.
 
+## Features
+
+- Cookie-based session tracking so each browser tab keeps an isolated vector store and API key.
+- Async ingestion pipeline that parses PDFs, chunks them, and builds embeddings without blocking the event loop.
+- Exponential backoff and retry logic when the Gemini API responds with rate limits.
+- Real-time updates via server-sent events (SSE) to drive toasts, progress, and streaming answers in the UI.
+- Works with the free tier of the Gemini API—bring your own key and start experimenting immediately.
+
+## Demo
+
+<a href="https://youtu.be/acCM6WsIu0c" target="_blank" rel="noopener">
+   <img src="https://img.youtube.com/vi/acCM6WsIu0c/hqdefault.jpg" alt="Document Q&A RAG demo video" width="640">
+</a>
+
 ## Prerequisites
 
 - **Python 3.9.23** (use this exact interpreter version to avoid compatibility issues)
