@@ -7,7 +7,7 @@ import logging
 import random
 from io import BytesIO
 from typing import List, Optional
-
+import os
 import faiss
 import numpy as np
 from langchain_core.documents import Document
@@ -15,6 +15,8 @@ from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from pypdf import PdfReader
+import dotenv
+dotenv.load_dotenv()
 
 logger = logging.getLogger("app.ingestion")
 
@@ -77,10 +79,11 @@ def init_vectorstore_sync(
     google_api_key: Optional[str] = None,
 ) -> tuple[GoogleGenerativeAIEmbeddings, FAISS]:
     """Initialise embeddings and a FAISS index for the ingest pipeline."""
-    emb = GoogleGenerativeAIEmbeddings(model=embedding_model, google_api_key=google_api_key)
-    dim = len(emb.embed_query("probe"))
-    index = faiss.IndexFlatL2(dim)
-    vs = FAISS(embedding_function=emb, index=index, docstore=InMemoryDocstore(), index_to_docstore_id={})
+    key = (google_api_key or os.getenv("GOOGLE_API_KEY") or "").strip()
+    if not key:
+        raise ValueError("No Google API key configured; set GOOGLE_API_KEY or supply one per session.")
+    emb = GoogleGenerativeAIEmbeddings(model=embedding_model, google_api_key=key)
+    vs = FAISS(embedding_function=emb, index=None, docstore=InMemoryDocstore({}), index_to_docstore_id={})
     return emb, vs
 
 
