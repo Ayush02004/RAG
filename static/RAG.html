@@ -50,6 +50,10 @@
       gap: 16px;
     }
 
+    .hidden {
+      display: none !important;
+    }
+
     .brand {
       display: flex;
       align-items: center;
@@ -237,6 +241,30 @@
       border: 1px solid rgba(148, 163, 184, 0.35);
       border-radius: 14px;
       background: #f8fafc;
+      width: 100%;
+    }
+
+    .api-key-section {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      align-items: flex-start;
+    }
+
+    .api-key-toggle {
+      padding: 10px 18px;
+    }
+
+    .api-key-toggle.is-open {
+      background: var(--accent);
+      color: #fff;
+      border-color: transparent;
+      box-shadow: 0 12px 24px rgba(37, 99, 235, 0.2);
+    }
+
+    .api-key-toggle.is-open:hover {
+      background: var(--accent-hover);
+      color: #fff;
     }
 
     .api-key-block label {
@@ -432,13 +460,16 @@
           <h2>1. Upload your PDF</h2>
           <p>We will index the document so you can ask questions about its contents.</p>
         </div>
-        <div class="api-key-block">
-          <label for="apiKeyInput">Gemini API key (optional)</label>
-          <div class="api-key-controls">
-            <input type="password" id="apiKeyInput" placeholder="Enter your Google API key" autocomplete="off" />
-            <button id="saveApiKeyBtn" class="outline">Save Key</button>
-          </div>
+        <div class="api-key-section">
+          <button type="button" id="toggleApiKeyBtn" class="outline api-key-toggle" aria-expanded="false">Use custom API key</button>
           <small id="apiKeyStatus" class="api-key-status muted">Using server default key.</small>
+          <div class="api-key-block hidden" id="apiKeyPanel" aria-hidden="true">
+            <label for="apiKeyInput">Gemini API key (optional)</label>
+            <div class="api-key-controls">
+              <input type="password" id="apiKeyInput" placeholder="Enter your Google API key" autocomplete="off" />
+              <button id="saveApiKeyBtn" class="outline">Save Key</button>
+            </div>
+          </div>
         </div>
         <div class="upload-controls">
           <div class="dropzone" id="dropzone">
@@ -486,6 +517,8 @@ const sessionIdEl = document.getElementById('sessionId');
 const apiKeyInput = document.getElementById('apiKeyInput');
 const saveApiKeyBtn = document.getElementById('saveApiKeyBtn');
 const apiKeyStatus = document.getElementById('apiKeyStatus');
+const toggleApiKeyBtn = document.getElementById('toggleApiKeyBtn');
+const apiKeyPanel = document.getElementById('apiKeyPanel');
 const startBtn = document.getElementById('startBtn');
 const fileInput = document.getElementById('fileInput');
 const dropzone = document.getElementById('dropzone');
@@ -505,6 +538,7 @@ let selectedFile = null;
 
 startBtn.disabled = true;
 saveApiKeyBtn.disabled = true;
+apiKeyInput.disabled = true;
 
 function showToast(message, tone = 'info', duration = 4500) {
   const toast = document.createElement('div');
@@ -552,9 +586,40 @@ function setDropzoneLoading(active, message = 'Processing…') {
   dropzoneStatus.textContent = message;
 }
 
+function refreshApiKeyControls() {
+  const panelVisible = !apiKeyPanel.classList.contains('hidden');
+  const hasSession = Boolean(sessionId);
+  const enableControls = panelVisible && hasSession;
+  apiKeyInput.disabled = !enableControls;
+  saveApiKeyBtn.disabled = !enableControls;
+}
+
+function setApiKeyPanel(open) {
+  if (open) {
+    apiKeyPanel.classList.remove('hidden');
+    apiKeyPanel.setAttribute('aria-hidden', 'false');
+    toggleApiKeyBtn.setAttribute('aria-expanded', 'true');
+    toggleApiKeyBtn.classList.add('is-open');
+    toggleApiKeyBtn.textContent = 'Hide custom API key';
+  } else {
+    apiKeyPanel.classList.add('hidden');
+    apiKeyPanel.setAttribute('aria-hidden', 'true');
+    toggleApiKeyBtn.setAttribute('aria-expanded', 'false');
+    toggleApiKeyBtn.classList.remove('is-open');
+    toggleApiKeyBtn.textContent = 'Use custom API key';
+  }
+  refreshApiKeyControls();
+  if (open && !apiKeyInput.disabled) {
+    setTimeout(() => apiKeyInput.focus(), 150);
+  }
+}
+
+setApiKeyPanel(false);
+
 async function handleSaveApiKey() {
   if (!sessionId) {
     showToast('Please wait for the session to initialize.', 'warn');
+    refreshApiKeyControls();
     return;
   }
 
@@ -585,7 +650,7 @@ async function handleSaveApiKey() {
     console.error(err);
     showToast(err.message || 'Unable to save API key.', 'error');
   } finally {
-    saveApiKeyBtn.disabled = false;
+    refreshApiKeyControls();
   }
 }
 
@@ -598,13 +663,13 @@ async function ensureSession() {
     }
     sessionId = data.session_id;
     sessionIdEl.textContent = sessionId;
-    saveApiKeyBtn.disabled = false;
+    refreshApiKeyControls();
     return sessionId;
   } catch (err) {
     console.error(err);
     sessionIdEl.textContent = 'error';
     showToast('Unable to establish a session. Refresh the page.', 'error');
-    saveApiKeyBtn.disabled = true;
+    refreshApiKeyControls();
     return null;
   }
 }
@@ -646,6 +711,8 @@ function openEventStream() {
     } else if (msg === '__SESSION_DESTROYED__') {
       showToast('Session expired. Refresh to start again.', 'warn');
       es.close();
+      sessionId = null;
+      setApiKeyPanel(false);
       askBtn.disabled = true;
       setStatus('Session expired', 'warn');
       setDropzoneLoading(false);
@@ -808,6 +875,11 @@ dropzone.addEventListener('drop', (event) => {
   dt.items.add(file);
   fileInput.files = dt.files;
   updateSelectedFile(file);
+});
+
+toggleApiKeyBtn.addEventListener('click', () => {
+  const shouldOpen = apiKeyPanel.classList.contains('hidden');
+  setApiKeyPanel(shouldOpen);
 });
 
 saveApiKeyBtn.addEventListener('click', handleSaveApiKey);
