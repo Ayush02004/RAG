@@ -55,6 +55,21 @@
       font-size: 1.75rem;
     }
 
+    .github-link {
+      text-decoration: none;
+      color: var(--accent);
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 0;
+      transition: color 0.2s ease;
+    }
+
+    .github-link:hover {
+      color: var(--accent-hover);
+    }
+
     .session-pill {
       font-size: 0.9rem;
       padding: 6px 12px;
@@ -110,7 +125,8 @@
       text-align: center;
     }
 
-    input[type="text"] {
+    input[type="text"],
+    input[type="password"] {
       flex: 1 1 260px;
       padding: 12px 14px;
       border-radius: 10px;
@@ -119,7 +135,8 @@
       transition: border-color 0.2s, box-shadow 0.2s;
     }
 
-    input[type="text"]:focus {
+    input[type="text"]:focus,
+    input[type="password"]:focus {
       outline: none;
       border-color: var(--accent);
       box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
@@ -143,6 +160,18 @@
 
     button.primary:hover {
       background: var(--accent-hover);
+      transform: translateY(-1px);
+    }
+
+    button.outline {
+      background: #fff;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      box-shadow: none;
+    }
+
+    button.outline:hover {
+      background: rgba(37, 99, 235, 0.1);
       transform: translateY(-1px);
     }
 
@@ -173,6 +202,36 @@
       display: flex;
       flex-direction: column;
       gap: 6px;
+    }
+
+    .api-key-block {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 16px;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      border-radius: 14px;
+      background: #f8fafc;
+    }
+
+    .api-key-block label {
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .api-key-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .api-key-controls input {
+      flex: 1 1 260px;
+    }
+
+    .api-key-status {
+      font-size: 0.85rem;
     }
 
     .dropzone {
@@ -297,6 +356,10 @@
     .toast.warn { background: var(--warn); }
     .toast.error { background: var(--error); }
 
+    .muted {
+      color: var(--muted);
+    }
+
     .spinner {
       width: 46px;
       height: 46px;
@@ -325,6 +388,7 @@
   <div class="app">
     <header>
       <h1>Document Q&A Assistant</h1>
+      <a class="github-link" href="https://github.com/Ayush02004/RAG" target="_blank" rel="noopener">GitHub</a>
       <span class="session-pill">Session: <strong id="sessionId">connecting…</strong></span>
     </header>
     <main>
@@ -332,6 +396,14 @@
         <div>
           <h2>1. Upload your PDF</h2>
           <p>We will index the document so you can ask questions about its contents.</p>
+        </div>
+        <div class="api-key-block">
+          <label for="apiKeyInput">Gemini API key (optional)</label>
+          <div class="api-key-controls">
+            <input type="password" id="apiKeyInput" placeholder="Enter your Google API key" autocomplete="off" />
+            <button id="saveApiKeyBtn" class="outline">Save Key</button>
+          </div>
+          <small id="apiKeyStatus" class="api-key-status muted">Using server default key.</small>
         </div>
         <div class="upload-controls">
           <div class="dropzone" id="dropzone">
@@ -376,6 +448,9 @@
 
 <script>
 const sessionIdEl = document.getElementById('sessionId');
+const apiKeyInput = document.getElementById('apiKeyInput');
+const saveApiKeyBtn = document.getElementById('saveApiKeyBtn');
+const apiKeyStatus = document.getElementById('apiKeyStatus');
 const startBtn = document.getElementById('startBtn');
 const fileInput = document.getElementById('fileInput');
 const dropzone = document.getElementById('dropzone');
@@ -394,6 +469,7 @@ let es = null;
 let selectedFile = null;
 
 startBtn.disabled = true;
+saveApiKeyBtn.disabled = true;
 
 function showToast(message, tone = 'info', duration = 4500) {
   const toast = document.createElement('div');
@@ -441,6 +517,43 @@ function setDropzoneLoading(active, message = 'Processing…') {
   dropzoneStatus.textContent = message;
 }
 
+async function handleSaveApiKey() {
+  if (!sessionId) {
+    showToast('Please wait for the session to initialize.', 'warn');
+    return;
+  }
+
+  const key = apiKeyInput.value.trim();
+  saveApiKeyBtn.disabled = true;
+
+  try {
+    const resp = await fetch('/api-key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: key || null }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      throw new Error(data.detail || 'Failed to update API key');
+    }
+
+    apiKeyStatus.textContent = data.using_default
+      ? 'Using server default key.'
+      : 'Custom key saved for this session.';
+
+    showToast(data.message || 'API key updated.', data.using_default ? 'info' : 'success');
+
+    if (data.reingest_required) {
+      showToast('Re-upload your PDF to apply the new key.', 'warn', 6000);
+    }
+  } catch (err) {
+    console.error(err);
+    showToast(err.message || 'Unable to save API key.', 'error');
+  } finally {
+    saveApiKeyBtn.disabled = false;
+  }
+}
+
 async function ensureSession() {
   try {
     const res = await fetch('/session', { method: 'POST' });
@@ -450,11 +563,13 @@ async function ensureSession() {
     }
     sessionId = data.session_id;
     sessionIdEl.textContent = sessionId;
+    saveApiKeyBtn.disabled = false;
     return sessionId;
   } catch (err) {
     console.error(err);
     sessionIdEl.textContent = 'error';
     showToast('Unable to establish a session. Refresh the page.', 'error');
+    saveApiKeyBtn.disabled = true;
     return null;
   }
 }
@@ -658,6 +773,16 @@ dropzone.addEventListener('drop', (event) => {
   dt.items.add(file);
   fileInput.files = dt.files;
   updateSelectedFile(file);
+});
+
+saveApiKeyBtn.addEventListener('click', handleSaveApiKey);
+apiKeyInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    if (!saveApiKeyBtn.disabled) {
+      handleSaveApiKey();
+    }
+  }
 });
 
 startBtn.addEventListener('click', handleUpload);

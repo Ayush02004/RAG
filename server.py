@@ -9,7 +9,6 @@ from typing import Dict, Optional, List
 from uuid import uuid4
 from io import BytesIO
 import dotenv
-dotenv.load_dotenv()
 from fastapi import FastAPI, Form, Request, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,11 +23,13 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 # Gemini streaming
 from google import genai
 from google.genai import types
 
+dotenv.load_dotenv()
 # -----------------------
 # Logging
 # -----------------------
@@ -39,29 +40,24 @@ logger = logging.getLogger("app")
 # App and CORS
 # -----------------------
 app = FastAPI()
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=["*"],  # change to your front-end origin in production
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-#     allow_credentials=True,
-# )
 
-ALLOWED_ORIGINS = [
-    "http://127.0.0.1:5500",   # your dev static server
-    "http://127.0.0.1:5501",   # your dev static server
-    "http://localhost:5500",
-    "http://localhost:5173",   # vite default
-    "http://localhost:3000",   # react dev server etc
-]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,   # <- not "*"
+    allow_origins=["*"],   # <- not "*"
     allow_credentials=True,          # must be True to allow cookies
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# -----------------------
+# Request models
+# -----------------------
+
+
+class ApiKeyPayload(BaseModel):
+    api_key: Optional[str] = None
+
 
 # -----------------------
 # Registry keyed by session_id (one session per user)
@@ -72,7 +68,8 @@ app.add_middleware(
 #   "emb": Embeddings | None,
 #   "ingestion_task": asyncio.Task | None,
 #   "ingestion_done": bool,
-#   "ttl_task": asyncio.Task | None
+#   "ttl_task": asyncio.Task | None,
+#   "api_key": Optional[str]
 # }
 # -----------------------
 registry: Dict[str, Dict] = {}
@@ -99,6 +96,7 @@ def create_session() -> str:
         "ingestion_task": None,
         "ingestion_done": False,
         "ttl_task": None,
+        "api_key": None,
     }
     logger.info(f"session_created: {sid}")
     # create TTL watcher
@@ -227,8 +225,9 @@ def chunk_pages_to_documents(pages: List[str], pdf_path: str, pages_per_chunk: i
 # -----------------------
 # Embeddings & FAISS init
 # -----------------------
-def init_vectorstore_sync(embedding_model: str = "models/gemini-embedding-001"):
-    emb = GoogleGenerativeAIEmbeddings(model=embedding_model, google_api_key=os.environ.get("GOOGLE_API_KEY"))
+def init_vectorstore_sync(embedding_model: str = "models/gemini-embedding-001", google_api_key: Optional[str] = None):
+    key = google_api_key or os.environ.get("GOOGLE_API_KEY")
+    emb = GoogleGenerativeAIEmbeddings(model=embedding_model, google_api_key=key)
     dim = len(emb.embed_query("probe"))
     index = faiss.IndexFlatL2(dim)
     vs = FAISS(embedding_function=emb, index=index, docstore=InMemoryDocstore(), index_to_docstore_id={})
@@ -376,6 +375,35 @@ async def session_endpoint():
     )
     return resp
 
+
+@app.post("/api-key")
+async def set_api_key(request: Request, payload: ApiKeyPayload):
+    session_id = get_session_id_from_request(request)
+    if not session_id or session_id not in registry:
+        raise HTTPException(status_code=400, detail="No session; call /session or open /events to get one")
+
+    entry = registry[session_id]
+    key = (payload.api_key or "").strip()
+    using_default = True
+    message = "Using default API key from server environment."
+
+    if key:
+        entry["api_key"] = key
+        using_default = False
+        message = "Custom API key saved for this session."
+    else:
+        entry["api_key"] = None
+
+    reingest_required = bool(entry.get("vs"))
+
+    return JSONResponse(
+        {
+            "message": message,
+            "using_default": using_default,
+            "reingest_required": reingest_required,
+        }
+    )
+
 # -----------------------
 # Upload endpoint (no session_id param — uses cookie to associate)
 # -----------------------
@@ -441,8 +469,9 @@ async def upload(request: Request, file: UploadFile = File(...)):
     ids = [uuid4().hex for _ in docs]
 
     # init embeddings+FAISS
+    session_api_key = entry.get("api_key")
     try:
-        emb, vs = await asyncio.to_thread(init_vectorstore_sync, "models/gemini-embedding-001")
+        emb, vs = await asyncio.to_thread(init_vectorstore_sync, "models/gemini-embedding-001", session_api_key)
     except Exception as e:
         await safe_put(q, f"error: init embeddings failed: {str(e)}")
         await safe_put(q, "__SESSION_DESTROYED__")
@@ -569,8 +598,12 @@ async def query(
     logger.info(f"query_context_built session={session_id} len={len(context)}")
 
     # stream Gemini response
+    api_key = entry.get("api_key") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="No API key configured on server")
+
     def gen_stream():
-        client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
+        client = genai.Client(api_key=api_key)
         model = "gemini-2.5-flash"
         system_text = f"Answer using ONLY the context below. If not available, respond 'I don't know.'\n\n{context}"
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=question)])]
